@@ -1,130 +1,151 @@
 #include "shell.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#define MAX_INPUT_SIZE 1024
 
 /**
- * prompt_display - display shell prompt
+ * shell_main - main shell loop
+ * @info: info struct
+ * @av: argument vector
  * Return: void
  */
-void prompt_display(void)
+
+int shell_main(info_t *info, char **av)
 {
-	printf("$ ");
-	fflush(stdout);
+	ssize_t x = 0;
+	int builtin = 0;
+
+	while (x != -1 && builtin != -2)
+	{
+		clearenv(info);
+		if (interactive(info))
+			_puts("$ ");
+		_eputchar(BUFFER_FLUSH);
+		x = get_input(info);
+		if (x != -1)
+		{
+			set_info(info, av);
+			builtin = find_builtin(info);
+			if (builtin == -1)
+				find_cmd(info);
+		}
+		else if (interactive(info))
+			_putchar('\n');
+		free_info(info, 0);
+	}
+	write_history(info);
+	free_info(info, 1);
+	if (!interactive(info) && info->status)
+		exit(info->status);
+	if (builtin == -2)
+	{
+		if (info->err_num == -1)
+			exit(info->status);
+		exit(info->err_num);
+	}
+	return (builtin);
 }
 
 /**
- * execute_command - execute user command
- * @command: given command
+ * find_builtin - finds a builtin command
+ * @info: pararmeter
  * Return: void
  */
-void execute_command(char *command)
+int find_builtin(info_t *info)
+{
+	int x, built_in = -1;
+	builtin_table builtintbl[] = {
+		{"exit", _exit},
+		{"env", _myenv},
+		{"help", _myhelp},
+		{"history", _myhistory},
+		{"setenv", _mysetenv},
+		{"unsetenv", _unsetenv},
+		{"cd", _mycd},
+		{"alias", _myalias},
+		{NULL, NULL}
+	};
+
+	for (x = 0; builtintbl[x].type; x++)
+		if (_strcmp(info->argv[0], builtintbl[x].type) == 0)
+		{
+			info->line_count++;
+			built_in = builtintbl[x].func(info);
+			break;
+		}
+	return (built_in);
+}
+
+/**
+ * find_cmd - find command
+ * @info: parameter
+ * Return: void
+ */
+void find_cmd(info_t *info)
+{
+	char *p = NULL;
+	int x, y;
+
+	info->p = info->argv[0];
+	if (info->linecount_flag == 1)
+	{
+		info->line_count++;
+		info->linecount_flag = 0;
+	}
+	for (x = 0, y = 0; info->arg[x]; x++)
+		if (!is_delim(info->arg[x], " \t\n"))
+			y++;
+	if (!y)
+		return;
+
+	p = find_path(info, getenv(info, "PATH="), info->argv[0]);
+	if (p)
+	{
+		info->p = p;
+		fork_cmd(info);
+	}
+	else
+	{
+		if ((interactive(info) || _getenv(info, "PATH=")
+					|| info->argv[0][0] == '/') && find_cmd(info, info->argv[0]))
+			fork_cmd(info);
+		else if (*(info->arg) != '\n')
+		{
+			info->status = 127;
+			print_error(info, "not found\n");
+		}
+	}
+}
+
+/**
+ * fork_cmd - forks a an exec thread
+ * @info: parameter
+ * Return: void
+ */
+void fork_cmd(info_t *info)
 {
 	pid_t pid = fork();
-	int status;
 
 	if (pid == -1)
 	{
-		perror("fork");
-		exit(EXIT_FAILURE);
+		perror("Error:");
+		return;
 	}
-	else if (pid == 0)
+	if (pid == 0)
 	{
-		/* Child Process */
-		execlp(command, command, (char *)NULL);
-
-		/* If execlp fails, print an error message using perror */
-		fprintf(stderr, "%s: %s: command not found\n", __FILE__, command);
-		exit(EXIT_FAILURE);
+		if (execve(info->path, info->argv, int get_environ(info)) == -1)
+		{
+			free_info(info, 1);
+			if (errno == EACCES)
+				exit(126);
+			exit(1);
+		}
 	}
 	else
 	{
-		/* Parent Process - wait for child process to complete */
-		waitpid(pid, &status, 0);
-
-		if (WIFEXITED(status))
+		wait(&(info->status));
+		if (WIFEXITED(info->status))
 		{
-			/* Child process exited normally */
-			printf("Child process exited with status %d\n", WEXITSTATUS(status));
-		}
-		else if (WIFSIGNALED(status))
-		{
-			/* Child process terminated by a signal */
-			printf("Child process terminated by signal %d\n", WTERMSIG(status));
+			info->status = WEXITSTATUS(info->status);
+			if (info->status == 126)
+				print_error(info, "Permission denied\n");
 		}
 	}
-}
-
-/**
- * process_interactive - process commands
- * Return: void
- */
-void process_interactive(void)
-{
-	char input[MAX_INPUT_SIZE];
-
-	while (1)
-	{
-		prompt_display();
-		if (fgets(input, MAX_INPUT_SIZE, stdin) == NULL)
-		{
-			printf("\n");
-			break;
-		}
-		input[strcspn(input, "\n")] = '\0';
-		execute_command(input);
-	}
-}
-
-/**
- * process_script - process commands from script
- * @script_filename: parameter
- * Return: void
- */
-void process_script(char *script_filename)
-{
-	FILE *file;
-	char line[MAX_INPUT_SIZE];
-
-	file = fopen(script_filename, "r");
-
-	if (file == NULL)
-	{
-		perror("fopen");
-		exit(EXIT_FAILURE);
-	}
-	while (fgets(line, sizeof(line), file) != NULL)
-	{
-		line[strcspn(line, "\n")] = '\0';
-		execute_command(line);
-	}
-	fclose(file);
-}
-
-/**
- * main - begin shell process
- * @argc: argument
- * @argv: argument
- * Return: void
- */
-int main(int argc, char *argv[])
-{
-	if (argc == 1)
-	{
-		process_interactive();
-	}
-	else if (argc == 2)
-	{
-		process_script(argv[1]);
-	}
-	else
-	{
-		fprintf(stderr, "Usage: %s [script]\n", argv[0]);
-		exit(EXIT_FAILURE);
-	}
-	return (0);
 }
